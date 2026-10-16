@@ -1,21 +1,40 @@
 # Orbit Auth RBAC: development
 
-This package declares support for `>=3.11,<3.15` in `pyproject.toml`. That declaration is distinct from evidence that hosted CI ran.
+The package declares Python `>=3.11,<3.15` support. Confirm actual per-version hosted CI results
+before claiming that the full range has been exercised.
 
-Use the checks for each language manifest present in this repository:
+## Local checks
 
-### Python package
+In a workspace checkout, install the sibling capability followed by this package's development
+tools:
 
 ```bash
-python -m pip install -e '.[dev]' build
+python -m pip install -e ../orbit-auth
+python -m pip install -e '.[dev]'
+pip-audit --skip-editable --progress-spinner off
 pytest
 ruff check src tests
 ruff format --check src tests
 mypy
 ```
 
-Optional SDKs and live-service tests are described by the package README. Do not run an opt-in live test against a shared or production service unless its own documentation explicitly supports that use.
+The tests need no database, network service, or external identity provider. They cover exact grant
+union, default denial, immutable policy snapshots, role subject validation, identifier/cardinality
+bounds, sanitized errors, and membership checks that avoid unnecessary permission materialization.
 
-## Contribution expectations
+## Contract changes
 
-Add focused regression coverage for behavior changes. Update the README and relevant guide when a contract, configuration option, security property, lifecycle rule, or operational assumption changes. Report the exact versions and services exercised; local checks do not imply hosted CI or release validation.
+Preserve the separation between authenticated identity and permission evaluation. When changing role
+or permission identifier rules, check compatibility with `orbit-auth` roles and add tests for
+boundary lengths, invalid characters, mutation of source mappings after construction, and unknown
+roles. Document any change to grant semantics, exception codes, role cardinality, or policy lifecycle
+in the README and architecture/security guides.
+
+Report exact Python/tool versions and test results. Local tests verify this evaluator's behavior;
+they do not verify upstream role provenance or application authorization policy.
+
+The current local quality matrix passes on CPython 3.11, 3.12, 3.13, and 3.14: all 20 tests, Ruff
+lint and format checks, strict mypy, dependency audits, and wheel/sdist builds pass on each
+interpreter. Editable Core and Auth distributions are skipped by pip-audit and are audited in their
+own repositories. This covers deterministic policy evaluation only; application route protection
+and authorization-policy review remain responsibilities of the integrating application.

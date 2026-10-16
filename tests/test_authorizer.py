@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from orbit.errors import ErrorCategory, OrbitError
+from orbit_auth import Identity, Principal
 
 from orbit_auth_rbac import PermissionAuthorizer, PermissionDenied, RoleSubject
 
@@ -43,6 +45,17 @@ def test_permissions_are_the_union_of_exact_role_grants() -> None:
     assert authorizer.allows(principal("reader", "editor"), "catalog.write")
     assert not authorizer.allows(principal("reader"), "catalog.write")
     assert not authorizer.allows(principal("reader"), "catalog.read.all")
+
+
+def test_orbit_auth_principal_implements_the_structural_role_subject_contract() -> None:
+    authorizer = PermissionAuthorizer({"catalog-editor": {"catalog.read", "catalog.write"}})
+    principal = Principal(
+        identity=Identity(subject="operator-1", provider="internal"),
+        roles=frozenset({"catalog-editor"}),
+    )
+
+    assert isinstance(principal, RoleSubject)
+    assert authorizer.allows(principal, "catalog.write")
 
 
 def test_unknown_and_anonymous_roles_default_to_deny() -> None:
@@ -107,6 +120,9 @@ def test_requires_raises_rbac_denial_without_disclosing_grants_or_permission() -
     assert error.value.code == "rbac.forbidden"
     assert str(error.value) == "The current subject is not authorized for this operation."
     assert "catalog.write" not in str(error.value)
+    assert isinstance(error.value, OrbitError)
+    assert isinstance(error.value, PermissionError)
+    assert error.value.problem.category is ErrorCategory.SECURITY
 
 
 def test_subject_must_expose_immutable_bounded_role_identifiers() -> None:
@@ -119,3 +135,115 @@ def test_subject_must_expose_immutable_bounded_role_identifiers() -> None:
 
     with pytest.raises(ValueError, match="identifiers"):
         authorizer.allows(Subject(roles=frozenset({"bad role"})), "catalog.read")
+
+
+def test_role_graph_inherits_parent_permissions_transitively_and_is_detached() -> None:
+    grants = {
+        "reader": {"records.read"},
+        "regional-reviewer": {"records.review"},
+        "auditor": {"audit.read"},
+    }
+    inheritance = {
+        "regional-reviewer": {"reader"},
+        "auditor": {"regional-reviewer"},
+    }
+    authorizer = PermissionAuthorizer(grants, inherits=inheritance)
+    inheritance["auditor"].clear()
+    grants["reader"].clear()
+
+    assert authorizer.allows(principal("auditor"), "records.read")
+    assert authorizer.allows(principal("auditor"), "records.review")
+    assert authorizer.permissions_for(principal("auditor")) == frozenset(
+        {"audit.read", "records.read", "records.review"}
+    )
+
+
+@pytest.mark.parametrize(
+    "inheritance",
+    [
+        {"reader": {"undefined"}},
+        {"reader": {"editor"}, "editor": {"reader"}},
+    ],
+)
+def test_role_graph_rejects_unknown_parents_and_cycles(inheritance: object) -> None:
+    with pytest.raises(ValueError, match="undefined|cycle"):
+        PermissionAuthorizer(
+            {"reader": {"records.read"}, "editor": {"records.write"}},
+            inherits=inheritance,  # type: ignore[arg-type]
+        )
+
+
+def test_attribute_rules_enforce_tenant_and_record_scope_from_verified_claims() -> None:
+    authorizer = PermissionAuthorizer(
+        {"regional-editor": {"records.update"}},
+        attribute_bindings={
+            "records.update": {
+                "tenant_id": "tenant_id",
+                "region_id": "region_id",
+            }
+        },
+    )
+    subject = Principal(
+        identity=Identity(
+            subject="operator-7",
+            provider="internal",
+            claims={"tenant_id": "tenant-a", "region_id": "north"},
+        ),
+        roles=frozenset({"regional-editor"}),
+    )
+    matching_record = {"tenant_id": "tenant-a", "region_id": "north"}
+
+    assert authorizer.allows(subject, "records.update", resource_attributes=matching_record)
+    assert not authorizer.allows(
+        subject,
+        "records.update",
+        resource_attributes={"tenant_id": "tenant-b", "region_id": "north"},
+    )
+    assert not authorizer.allows(
+        subject,
+        "records.update",
+        resource_attributes={"tenant_id": "tenant-a", "region_id": "south"},
+    )
+    assert not authorizer.allows(subject, "records.update")
+    missing_claim = Principal(
+        identity=Identity(subject="operator-8", provider="internal"),
+        roles=frozenset({"regional-editor"}),
+    )
+    assert not authorizer.allows(
+        missing_claim, "records.update", resource_attributes=matching_record
+    )
+    assert "records.update" not in authorizer.permissions_for(subject)
+    assert authorizer.permissions_for(subject, resource_attributes=matching_record) == frozenset(
+        {"records.update"}
+    )
+
+
+def test_attribute_matching_is_typed_and_input_is_bounded() -> None:
+    authorizer = PermissionAuthorizer(
+        {"editor": {"record.update"}},
+        attribute_bindings={"record.update": {"tenant_id": "tenant_id"}},
+    )
+    subject = Principal(
+        identity=Identity(subject="operator", provider="internal", claims={"tenant_id": 1}),
+        roles=frozenset({"editor"}),
+    )
+    assert not authorizer.allows(subject, "record.update", resource_attributes={"tenant_id": True})
+    with pytest.raises(TypeError, match="scalar"):
+        authorizer.allows(
+            subject,
+            "record.update",
+            resource_attributes={"tenant_id": [1]},
+        )
+
+
+def test_attribute_policy_requires_a_granted_permission_and_valid_identifiers() -> None:
+    with pytest.raises(ValueError, match="no role grant"):
+        PermissionAuthorizer(
+            {"reader": {"records.read"}},
+            attribute_bindings={"records.write": {"tenant_id": "tenant_id"}},
+        )
+    with pytest.raises(ValueError, match="identifiers"):
+        PermissionAuthorizer(
+            {"reader": {"records.read"}},
+            attribute_bindings={"records.read": {"tenant id": "tenant_id"}},
+        )

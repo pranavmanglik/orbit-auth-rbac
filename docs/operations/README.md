@@ -1,69 +1,68 @@
-# Orbit Auth RBAC: operations and security
+# Orbit Auth RBAC: operations
 
-This guide organizes runtime behavior documented by the package. It does not certify production readiness. Verify provider/client versions, permissions, transport security, limits, and failure behavior in the target environment before release.
-
-## Configuration surface
-
-Environment names found in the package README:
-
-The package README does not name `ORBIT_*` variables. Use its typed constructors and application configuration, and confirm exact runtime inputs in the implementation before deployment.
-
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
-
-## Lifecycle, failure behavior, and limits
-
-`orbit-auth-rbac` maps trusted role identifiers to exact application permissions. It is framework and
-identity-provider independent and depends on the `orbit-auth` capability. Applications pass an already
-authenticated object that implements the small `RoleSubject` protocol:
-
-```bash
-pip install orbit-auth-rbac
-```
+`PermissionAuthorizer` is a synchronous, in-memory policy object. It opens no connections and reads
+no environment variables or files. Construct it from trusted application configuration during
+composition, then inject it into the service or policy boundary that performs permission checks.
 
 ```python
-from dataclasses import dataclass
+from orbit_auth import Principal
+from orbit_auth_rbac import PermissionAuthorizer
 
-from orbit_auth_rbac import PermissionAuthorizer, PermissionDenied
-
-
-@dataclass(frozen=True)
-class AuthenticatedSubject:
-    # Populate only from a trusted authentication or authorization boundary.
-    roles: frozenset[str]
-
-
-authorizer = PermissionAuthorizer(
+permissions = PermissionAuthorizer(
     {
         "catalog-reader": {"catalog.read"},
         "catalog-editor": {"catalog.read", "catalog.write"},
     }
 )
-subject = AuthenticatedSubject(frozenset({"catalog-editor"}))
 
-try:
-    authorizer.require(subject, "catalog.write")
-except PermissionDenied:
-    ...  # map this typed failure to the host framework's forbidden response
+
+def can_edit_catalog(subject: Principal | None) -> bool:
+    return permissions.allows(subject, "catalog.write")
 ```
 
-The grant map is detached and immutable. Role and permission identifiers, provider count, and total
-grants are bounded. Matching is exact; there are no wildcards, role hierarchies, implicit grants,
-policy persistence, or role assignment. Anonymous subjects, unknown roles, and unknown permissions
-are denied. The subject must expose roles as an immutable `frozenset[str]` with validated role
-identifiers.
+For tenant or record scope, bind trusted identity claims to fields from the server-loaded resource:
 
-`PermissionDenied` exposes the stable code `rbac.forbidden` and a generic message. It does not
-include the requested permission or grant contents. Application code is responsible for supplying
-roles from a verified security boundary and mapping this exception into its transport response.
-Passing role values supplied directly by an untrusted request is unsafe.
+```python
+permissions = PermissionAuthorizer(
+    {"regional-editor": {"records.update"}},
+    attribute_bindings={"records.update": {"tenant_id": "tenant_id", "region_id": "region_id"}},
+)
+allowed = permissions.allows(
+    verified_principal,
+    "records.update",
+    resource_attributes={"tenant_id": record.tenant_id, "region_id": record.region_id},
+)
+```
 
-## Status
+Do not accept resource attributes used for authorization from the request body. Load them from the
+database or another trusted server-side source.
 
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
+Use `require()` when the calling layer needs a typed `PermissionDenied` failure; use `allows()` for
+a boolean policy branch. Map denial to the transport's 403 behavior in the application. This
+package does not install HTTP routes or integrate itself with Core's route-role authorizer.
 
-Licensed under Apache-2.0.
+## Policy updates and runtime bounds
 
-## Production validation
+The grant mapping is copied and made immutable at construction. There is no runtime grant mutation,
+reload endpoint, persistence, or event propagation. To change configured grants, compose and publish
+a replacement authorizer and update every relevant application worker. Role membership comes from
+each request's verified `RoleSubject`, not from policy state stored here.
 
-Validate startup/shutdown cleanup, timeout and cancellation behavior, concurrency and payload bounds where applicable, secret rotation and least-privilege access, data durability, backup/restore, and failover against the selected provider. Do not infer distributed or durable guarantees from an in-process API or fake-client tests.
+The evaluator bounds policy role and grant counts and validates subject role cardinality and
+identifier syntax on each call. Keep normal application policies much smaller than the defensive
+maximums. The evaluator performs set membership over the subject's roles and only materializes the
+full permission union when `permissions_for()` is requested.
+
+## Troubleshooting
+
+- `PermissionDenied` means the subject is anonymous or none of its known roles grants the exact
+  requested permission.
+- Unknown role values are ignored for grants. Check the trusted role mapping; do not add wildcard
+  matching to work around a naming mismatch.
+- `TypeError` or `ValueError` indicates malformed policy, subject attributes, or
+  role/permission identifiers.
+  Treat these as configuration or integration defects rather than authorization denials.
+- Permission identifiers are case-sensitive and are not normalized.
+
+The package has no external service dependency. Local tests do not validate role provenance,
+application policy correctness, or how the host maps denial to an HTTP/API response.

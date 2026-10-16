@@ -1,23 +1,17 @@
 # Orbit Auth RBAC
 
-`orbit-auth-rbac` maps trusted role identifiers to exact application permissions. It is framework and
-identity-provider independent and builds on the `orbit-auth` capability contract. Applications pass an already
-authenticated object that implements the small `RoleSubject` protocol:
+`orbit-auth-rbac` maps trusted role identifiers to exact application permissions. It builds on the
+`orbit-auth` capability and Core's structured security-error contract. Its `Principal` already
+satisfies the structural `RoleSubject` protocol; applications can also pass their own trusted
+subject type:
 
 ```bash
 pip install orbit-auth-rbac
 ```
 
 ```python
-from dataclasses import dataclass
-
+from orbit_auth import Identity, Principal
 from orbit_auth_rbac import PermissionAuthorizer, PermissionDenied
-
-
-@dataclass(frozen=True)
-class AuthenticatedSubject:
-    # Populate only from a trusted authentication or authorization boundary.
-    roles: frozenset[str]
 
 
 authorizer = PermissionAuthorizer(
@@ -26,7 +20,10 @@ authorizer = PermissionAuthorizer(
         "catalog-editor": {"catalog.read", "catalog.write"},
     }
 )
-subject = AuthenticatedSubject(frozenset({"catalog-editor"}))
+subject = Principal(
+    identity=Identity(subject="operator-17", provider="internal"),
+    roles=frozenset({"catalog-editor"}),
+)
 
 try:
     authorizer.require(subject, "catalog.write")
@@ -34,16 +31,20 @@ except PermissionDenied:
     ...  # map this typed failure to the host framework's forbidden response
 ```
 
-The grant map is detached and immutable. Role and permission identifiers, provider count, and total
-grants are bounded. Matching is exact; there are no wildcards, role hierarchies, implicit grants,
-policy persistence, or role assignment. Anonymous subjects, unknown roles, and unknown permissions
-are denied. The subject must expose roles as an immutable `frozenset[str]` with validated role
-identifiers.
+The grant map and optional role graph are detached and immutable. A policy allows at most 1,024
+roles, 4,096 permissions per role, and 65,536 combined grants/inheritance edges. Inheritance must
+form an acyclic directed graph; child roles receive their parents' permissions transitively.
+Optional per-permission attribute bindings require trusted subject claims to equal resource fields,
+for example matching `region_id` and `tenant_id` before allowing a record operation. Missing or
+type-mismatched values deny access. Role and permission identifiers are at most 255 characters and
+use the documented ASCII identifier syntax. Anonymous subjects and unknown roles are denied. The
+subject must expose roles as an immutable `frozenset[str]` with validated role identifiers.
 
-`PermissionDenied` exposes the stable code `rbac.forbidden` and a generic message. It does not
-include the requested permission or grant contents. Application code is responsible for supplying
-roles from a verified security boundary and mapping this exception into its transport response.
-Passing role values supplied directly by an untrusted request is unsafe.
+`PermissionDenied` is a Core `OrbitError` in the security category with stable code `rbac.forbidden`
+and a generic message. It does not include the requested permission or grant contents. Application
+code is responsible for supplying roles and claims from a verified security boundary and mapping
+this exception into its transport response. Passing role or attribute values supplied directly by
+an untrusted request is unsafe.
 
 ## Documentation
 
@@ -60,8 +61,10 @@ mypy
 
 ## Status
 
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
+This is a **v0.1.0-alpha review candidate**, not a published release. On CPython 3.11.14, 3.12.14,
+3.13.15, and 3.14.7, all 20 tests, Ruff lint and format checks, strict mypy, dependency audits, and
+wheel/sdist builds pass locally. Hosted CI and application-level authorization-policy review remain
+release gates. The policy API may change before stable release.
 
 Licensed under Apache-2.0.
 
